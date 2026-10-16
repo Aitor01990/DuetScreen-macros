@@ -1,0 +1,10 @@
+{
+  "version": "v1.0.0.1",
+  "upstream_commit": "8cf206ddd2aad3a55852eb2125a318d94c8601f3",
+  "buildroot_commit": "7b01688559a5602a55d564651db279674a237263",
+  "buildroot_version": "v0.4.4",
+  "update_repository": "Aitor01990/DuetScreen-macros",
+  "preset": "T113-Release",
+  "logo_file": "branding/INDART3D.png",
+  "logo_sha256": "a66d80358eb8b77a758119ae8e0e3efb2fe3a77b2f2ddfaca87296dfbec29c31"
+}
