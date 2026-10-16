@@ -1,0 +1,58 @@
+name: INDART3D - Publicar versión estable validada
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: ID de la compilación verde con USB y SD probados físicamente
+        type: string
+        required: true
+      expected_version:
+        description: Versión exacta de distribution/config.json (por ejemplo v1.0.0.1)
+        type: string
+        required: true
+      hardware_confirmed:
+        description: He probado estos instaladores en pantalla real y apruebo publicarlos
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: indart3d-publicacion-estable
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      EXPECTED_VERSION: ${{ inputs.expected_version }}
+      HARDWARE_CONFIRMED: ${{ inputs.hardware_confirmed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verificar procedencia de compilación
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID" > /tmp/indart-run.json
+          python3 - <<'PY'
+          import json,os
+          r=json.load(open('/tmp/indart-run.json'))
+          assert r['status']=='completed' and r['conclusion']=='success'
+          assert r['head_sha']==os.environ['GITHUB_SHA'], 'Selecciona la misma rama/commit que compilaste'
+          assert r['path']=='.github/workflows/compilar-duetscreen.yml'
+          assert r['event']=='workflow_dispatch'
+          assert os.environ['HARDWARE_CONFIRMED']=='true', 'Prueba física no confirmada'
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          name: INDART3D-instaladores
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: artifacts
+      - name: Publicar sin sobrescribir versiones existentes
+        run: python3 scripts/publish_release.py

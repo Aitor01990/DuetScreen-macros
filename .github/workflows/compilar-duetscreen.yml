@@ -1,6 +1,15 @@
-name: DuetScreen v1.0.0 - Macros ARM T113
+name: INDART3D - Compilar pruebas ARM T113
 on:
   workflow_dispatch:
+    inputs:
+      full_image:
+        description: Generar también sdcard.img (necesario para publicar)
+        type: boolean
+        default: false
+      allow_unbranded:
+        description: Sólo desarrollo sin logo original (NO publicable)
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -16,6 +25,20 @@ jobs:
       BR2_DL_DIR: ${{ github.workspace }}/buildroot-duetscreen/dl
       BR2_JLEVEL: '2'
     steps:
+      - name: Checkout distribución INDART3D
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validar configuración y logo antes de compilar
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          python3 -m venv .ci-env
+          .ci-env/bin/pip install Pillow==12.3.0
+          .ci-env/bin/python scripts/distribution.py
+          if [ '${{ inputs.allow_unbranded }}' != 'true' ]; then
+            .ci-env/bin/python -c 'import sys; sys.path.insert(0,"scripts"); from distribution import config,check_logo; check_logo(config())'
+          fi
       - name: Checkout stable DuetScreen and submodules
         uses: actions/checkout@v4
         with:
@@ -47,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           bash buildroot-duetscreen/scripts/install_prerequisites.sh
-          sudo apt-get install -y ninja-build binutils libelf-dev zstd lz4 p7zip-full python3-venv
+          sudo apt-get install -y ninja-build binutils libelf-dev zstd lz4 p7zip-full python3-venv e2fsprogs nlohmann-json3-dev
           python3 -m venv DuetScreen/env
           DuetScreen/env/bin/pip install -r DuetScreen/requirements.txt
       - name: Cache public downloads
@@ -55,102 +78,25 @@ jobs:
         with:
           path: buildroot-duetscreen/dl
           key: duetscreen-downloads-v044-${{ runner.os }}-v1
-      - name: Apply macro thumbnail changes to exact stable source
+      - name: Probar actualizador y scripts
         run: |
           set -euo pipefail
-          test "$(git -C DuetScreen rev-parse HEAD)" = '8cf206ddd2aad3a55852eb2125a318d94c8601f3'
-          test "$(git -C buildroot-duetscreen rev-parse HEAD)" = '7b01688559a5602a55d564651db279674a237263'
-          mkdir -p artifacts
-          python3 - <<'PY'
-          from pathlib import Path
-          import subprocess, hashlib
-          root = Path('DuetScreen')
-          def edit(name, replacements):
-              p = root/name
-              raw = p.read_bytes()
-              crlf = b'\r\n' in raw
-              text = raw.decode().replace('\r\n','\n')
-              for old,new in replacements:
-                  assert text.count(old) == 1, (name, old, text.count(old))
-                  text = text.replace(old,new)
-              text = text.rstrip('\n')+'\n'
-              p.write_bytes(text.replace('\n','\r\n').encode() if crlf else text.encode())
-          edit('src/Comm/FileInfo.cpp', [
-              ('\t\tSaveCacheToFile(*request->GetData());', '\t\tSaveCacheToFile(*request->GetData());\n\t\tModel::get().post<EventType::FileInfoReady>(filepath);')])
-          block = '\n'.join([
-              '\t\t/* Retrieve file info and thumbnails for G-codes and macros, including subfolders. */',
-              '\t\tconst std::string_view directory = request->GetDir();',
-              '\t\tconst auto isWithin = [directory](std::string_view root)',
-              '\t\t{', '\t\t\tif (root.empty())', '\t\t\t{', '\t\t\t\treturn false;', '\t\t\t}',
-              "\t\t\twhile (root.size() > 1 && root.back() == '/')", '\t\t\t{',
-              '\t\t\t\troot.remove_suffix(1);', '\t\t\t}', '\t\t\treturn directory == root ||',
-              "\t\t\t\t   (directory.starts_with(root) && directory.size() > root.size() && directory[root.size()] == '/');",
-              '\t\t};',
-              '\t\tif (!isWithin(OM::Directories::GetGcodesDirectory()) && !isWithin(OM::Directories::GetMacrosDirectory()))'])
-          invalidation = '\n'.join([
-              '\t\t\t\tif (isWithin(OM::Directories::GetMacrosDirectory()))', '\t\t\t\t{',
-              '\t\t\t\t\t// Do not retain a previous image when a macro loses its thumbnail.',
-              '\t\t\t\t\tstd::error_code ec;',
-              '\t\t\t\t\tstd::filesystem::remove(GetThumbnailPath(item->GetPath(), true), ec);',
-              '\t\t\t\t\tstd::filesystem::remove(GetThumbnailPath(item->GetPath(), false), ec);',
-              '\t\t\t\t}', '\t\t\t\tFILEINFO_CACHE->QueueFileInfoRequest(item->GetPath());'])
-          edit('src/Subscribers/FileSubscribers.cpp', [
-              ('#include <string>', '#include <filesystem>\n#include <string>\n#include <string_view>\n#include <system_error>'),
-              ("\t\t/* We don't care about file info (and thumbnails) for files that aren't in the Gcodes directory */\n\t\tif (request->GetDir().find(OM::Directories::GetGcodesDirectory()) == std::string::npos)", block),
-              ('\t\t\t\tFILEINFO_CACHE->QueueFileInfoRequest(item->GetPath());', invalidation)])
-          event_path = root/'src/UI/Core/EventTypes.h'
-          event_line = next(l for l in event_path.read_text().splitlines(True) if 'XX(ThumbnailData,' in l)
-          edit('src/UI/Core/EventTypes.h', [(event_line, event_line.replace('ThumbnailData','FileInfoReady')+event_line)])
-          helper = '\n'.join([
-              '\tvoid FilePresenter::requestSelectedMacroThumbnail(const std::string& filename)', '\t{',
-              '\t\tUI_LOCK();', '\t\tif (m_baseFolder != BaseFolder::MACROS || m_clickedItem != filename ||',
-              '\t\t\t!getView()->getConfirmModal().isVisible())', '\t\t{', '\t\t\treturn;', '\t\t}',
-              '\t\t// Retry after metadata arrives or an already running small thumbnail completes.',
-              '\t\tm_macroThumbnailPending = !FILEINFO_CACHE->QueueLargeThumbnailRequest(filename);', '\t}', '', ''])
-          listener = '\n'.join([
-              '\t\tregisterEventListener<EventType::FileInfoReady>(', '\t\t\t[this](const std::string& filename)',
-              '\t\t\t{', '\t\t\t\tif (m_baseFolder != BaseFolder::MACROS)', '\t\t\t\t{',
-              '\t\t\t\t\treturn;', '\t\t\t\t}', '\t\t\t\tUI_LOCK();', '\t\t\t\tdisplayFiles();',
-              '\t\t\t\tif (m_clickedItem == filename && getView()->getConfirmModal().isVisible())', '\t\t\t\t{',
-              '\t\t\t\t\tconst auto thumbnail = GetThumbnailPath(filename);',
-              '\t\t\t\t\tgetView()->getConfirmModal().setImage(IsThumbnailCached(filename) ? thumbnail.c_str() : nullptr);',
-              '\t\t\t\t\trequestSelectedMacroThumbnail(filename);', '\t\t\t\t}', '\t\t\t});'])
-          edit('src/UI/Screens/File/FilePresenter.cpp', [
-              ('\t\tm_view->cancelStartPrint();', '\t\tm_view->cancelStartPrint();\n\t\tm_macroThumbnailPending = false;'),
-              ('\t\t\tm_view->confirmRunMacro(getDisplayName(item->GetName(), m_baseFolder));',
-               '\t\t\tLOG_INFO("Macro thumbnail support v1: {:s}", m_gcodePath);\n\t\t\tm_view->confirmRunMacro(getDisplayName(item->GetName(), m_baseFolder), GetThumbnailPath(item->GetPath()));\n\t\t\trequestSelectedMacroThumbnail(item->GetPath());'),
-              ('\tvoid FilePresenter::newThumbnailData(const std::string& filename)', helper+'\tvoid FilePresenter::newThumbnailData(const std::string& filename)'),
-              ('\t\t\tmodal.setImage(GetThumbnailPath(filename).c_str());', '\t\t\tmodal.setImage(GetThumbnailPath(filename).c_str());\n\t\t\tif (m_macroThumbnailPending)\n\t\t\t{\n\t\t\t\trequestSelectedMacroThumbnail(filename);\n\t\t\t}'),
-              ('\t\tregisterEventListener<EventType::ThumbnailData>(this, &FilePresenter::newThumbnailData);', '\t\tregisterEventListener<EventType::ThumbnailData>(this, &FilePresenter::newThumbnailData);\n'+listener)])
-          edit('src/UI/Screens/File/FilePresenter.h', [
-              ('\t\tvoid sortFiles();','\t\tvoid sortFiles();\n\t\tvoid requestSelectedMacroThumbnail(const std::string& filename);'),
-              ('\t\tstd::string m_clickedItem;','\t\tstd::string m_clickedItem;\n\t\tbool m_macroThumbnailPending = false;')])
-          edit('src/UI/Screens/File/FileView.h', [
-              ('void confirmRunMacro(std::string_view filename);','void confirmRunMacro(std::string_view filename, const std::filesystem::path& thumbnail);')])
-          edit('src/UI/Screens/File/FileView.cpp', [
-              ('void FileView::confirmRunMacro(std::string_view filename)','void FileView::confirmRunMacro(std::string_view filename, const std::filesystem::path& thumbnail)'),
-              ('m_startPrint.setOkCallback([this]() { m_presenter->runMacro(); });\n\t\tm_startPrint.setImage(nullptr);', 'm_startPrint.setOkCallback([this]() { m_presenter->runMacro(); });\n\t\tm_startPrint.setImage(IsThumbnailCached(thumbnail) ? thumbnail.c_str() : nullptr);')])
-          patch = subprocess.check_output(['git','-c','core.autocrlf=false','diff','--binary'],cwd=root)
-          expected = {
-              'src/Comm/FileInfo.cpp':'f5afb915bee54c1b024619ac6c10522078f9d59c177581067851161fbacf7df9',
-              'src/Subscribers/FileSubscribers.cpp':'7bf4f299a19ea1b50f3040530d33549be7e5c90480e361c4b275a687c4aa2676',
-              'src/UI/Core/EventTypes.h':'304747410a242f5c7f48cf9ade1021aa8c0ef672aa644fd15ec19253a0709b7d',
-              'src/UI/Screens/File/FilePresenter.cpp':'f53d02c4a0312b9d5f15e9fe4c6c0381904c8f1f78dd472866185bd3e48455ef',
-              'src/UI/Screens/File/FilePresenter.h':'22402ad125301d46a287bc6129bb1de44e003e443976f5e905722f8a52defa59',
-              'src/UI/Screens/File/FileView.cpp':'52a8dfd6b78ea75a9b8e7a33d2247c0ac683ac31968b6485dcd9507421b2d7cb',
-              'src/UI/Screens/File/FileView.h':'8283e5bc2b9dab051eb363183ffe91b399b941e76be1e6d4c7882b5f244c91b7'}
-          for name, digest in expected.items():
-              actual = hashlib.sha256((root/name).read_bytes()).hexdigest()
-              print(name, actual)
-              assert actual == digest, (name, actual, digest)
-          print('Generated diff SHA256:', hashlib.sha256(patch).hexdigest())
-          Path('artifacts/macro-thumbnails-v1.0.0.patch').write_bytes(patch)
-          PY
-          git -C DuetScreen -c core.whitespace=cr-at-eol diff --check
-          git -C DuetScreen diff --stat
+          python3 -m unittest discover -s tests -v
+          g++ -std=c++23 -Ipatches tests/test_update.cpp -o /tmp/test-indart-update
+          /tmp/test-indart-update
+      - name: Preparar distribución sin alterar thumbnails validados
+        run: |
+          set -euo pipefail
+          options=()
+          if [ '${{ inputs.allow_unbranded }}' = 'true' ]; then options+=(--allow-unbranded); fi
+          .ci-env/bin/python tests/check_source.py DuetScreen buildroot-duetscreen "${options[@]}"
+          .ci-env/bin/python scripts/prepare_source.py --source DuetScreen --buildroot buildroot-duetscreen "${options[@]}"
+          chmod +x scripts/post_build_indart.sh
           git -C DuetScreen submodule status --recursive | tee artifacts/submodules.txt
           if grep -Eq '^[-+U]' artifacts/submodules.txt; then exit 1; fi
-          git -C DuetScreen archive --format=zip --output=../artifacts/stable-source.zip HEAD
+          git -C DuetScreen -c core.whitespace=cr-at-eol diff --check
+          git -C DuetScreen diff --binary > artifacts/distribution.patch
+          cp distribution/config.json artifacts/distribution-config.json
       - name: Compile ARM T113 Release
         working-directory: buildroot-duetscreen
         run: |
@@ -162,69 +108,54 @@ jobs:
           test "${#binaries[@]}" -eq 1
           binary="${binaries[0]}"
           cmp "$binary" output/target/usr/bin/DuetScreen
-          make BR2_JLEVEL=2 2>&1 | tee ../artifacts/build-buildroot.log
-          test -f output/target/etc/buildroot_version
-      - name: Create and verify official USB upgrade archive
+          if [ '${{ inputs.full_image }}' = 'true' ]; then
+            make BR2_JLEVEL=2 2>&1 | tee ../artifacts/build-buildroot.log
+          else
+            make BR2_JLEVEL=2 target-finalize 2>&1 | tee ../artifacts/build-buildroot.log
+          fi
+      - name: Empaquetar y verificar instaladores reales
         run: |
           set -euo pipefail
-          cd DuetScreen
-          ./scripts/create_upgrade.sh
-          cd ..
+          (cd DuetScreen && ./scripts/create_upgrade.sh)
           cp DuetScreen/out/DuetScreen.tar.gz artifacts/
-          tar -tzf artifacts/DuetScreen.tar.gz > artifacts/archive-contents.txt
+          options=()
+          if [ '${{ inputs.full_image }}' = 'true' ]; then
+            cp buildroot-duetscreen/output/images/sdcard.img artifacts/
+            options+=(--full-image)
+          fi
+          if [ '${{ inputs.allow_unbranded }}' = 'true' ]; then options+=(--allow-unbranded); fi
+          .ci-env/bin/python scripts/verify_artifacts.py "${options[@]}" | tee artifacts/verification.log
           tar -tvzf artifacts/DuetScreen.tar.gz > artifacts/archive-permissions.txt
-          file buildroot-duetscreen/output/target/usr/bin/DuetScreen | tee artifacts/architecture.txt
-          readelf -h buildroot-duetscreen/output/target/usr/bin/DuetScreen | tee -a artifacts/architecture.txt
-          python3 - <<'PY'
-          import hashlib,json,pathlib,struct,tarfile,zipfile,subprocess
-          binary=pathlib.Path('buildroot-duetscreen/output/target/usr/bin/DuetScreen').read_bytes()
-          assert binary[:4]==b'\x7fELF' and binary[4:6]==b'\x01\x01'
-          assert struct.unpack_from('<H',binary,18)[0]==40
-          assert struct.unpack_from('<I',binary,36)[0]&0x400
-          assert b'Macro thumbnail support v1' in binary
-          with tarfile.open('artifacts/DuetScreen.tar.gz','r:gz') as archive:
-              members={m.name.removeprefix('./'):m for m in archive.getmembers()}
-              for n in ['usr/bin/DuetScreen','pre-update','post-update','buildroot_version']:
-                  assert n in members,n
-              for n in ['usr/bin/DuetScreen','pre-update','post-update']:
-                  assert members[n].mode&0o111,n
-              assert any(n.startswith('etc/assets/') for n in members)
-              assert archive.extractfile(members['usr/bin/DuetScreen']).read()==binary
-              assert archive.extractfile(members['buildroot_version']).read().strip()==b'v0.4.4'
-          archive=pathlib.Path('artifacts/DuetScreen.tar.gz')
-          manifest={'base':'8cf206ddd2aad3a55852eb2125a318d94c8601f3','buildroot':'7b01688559a5602a55d564651db279674a237263','preset':'T113-Release','binary_sha256':hashlib.sha256(binary).hexdigest(),'archive_sha256':hashlib.sha256(archive.read_bytes()).hexdigest(),'hardware_tested':False}
-          pathlib.Path('artifacts/build-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
-          with zipfile.ZipFile('artifacts/modified-source.zip','w',zipfile.ZIP_DEFLATED) as z:
-              for name in subprocess.check_output(['git','ls-files'],cwd='DuetScreen',text=True).splitlines():
-                  p=pathlib.Path('DuetScreen')/name
-                  if p.is_file(): z.write(p,name)
-          print(json.dumps(manifest,indent=2))
-          PY
-          (cd artifacts && sha256sum DuetScreen.tar.gz > DuetScreen.tar.gz.sha256)
-          echo '### ARM T113 USB package verified' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Download DuetScreen-USB-T113. Extract the ZIP only. Copy DuetScreen.tar.gz to USB without extracting it. RRF minimum: 3.6.2. No physical hardware test performed.' >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload validated USB update and source
+          file buildroot-duetscreen/output/target/usr/bin/DuetScreen > artifacts/architecture.txt
+          python3 scripts/snapshot_source.py
+          echo 'Validaciones superadas. Falta prueba física. No se ha publicado ninguna Release.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Subir instaladores verificados (14 días)
         uses: actions/upload-artifact@v4
         with:
-          name: DuetScreen-USB-T113
+          name: INDART3D-instaladores
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
           path: |
             artifacts/DuetScreen.tar.gz
-            artifacts/DuetScreen.tar.gz.sha256
+            artifacts/sdcard.img
+            artifacts/SHA256SUMS.txt
             artifacts/build-manifest.json
-            artifacts/macro-thumbnails-v1.0.0.patch
+      - name: Subir informe y parches (14 días)
+        uses: actions/upload-artifact@v4
+        with:
+          name: INDART3D-informe
+          retention-days: 14
+          path: |
+            artifacts/*.txt
+            artifacts/*.json
+            artifacts/*.patch
             artifacts/modified-source.zip
-            artifacts/submodules.txt
-            artifacts/architecture.txt
-            artifacts/archive-contents.txt
-            artifacts/archive-permissions.txt
       - name: Upload logs even on failure
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: DuetScreen-build-logs
+          name: INDART3D-logs
           if-no-files-found: warn
           retention-days: 7
           path: artifacts/*.log
