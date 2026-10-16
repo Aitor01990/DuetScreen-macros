@@ -1,0 +1,9 @@
+{
+  "src/Comm/FileInfo.cpp": "f5afb915bee54c1b024619ac6c10522078f9d59c177581067851161fbacf7df9",
+  "src/Subscribers/FileSubscribers.cpp": "7bf4f299a19ea1b50f3040530d33549be7e5c90480e361c4b275a687c4aa2676",
+  "src/UI/Core/EventTypes.h": "304747410a242f5c7f48cf9ade1021aa8c0ef672aa644fd15ec19253a0709b7d",
+  "src/UI/Screens/File/FilePresenter.cpp": "f53d02c4a0312b9d5f15e9fe4c6c0381904c8f1f78dd472866185bd3e48455ef",
+  "src/UI/Screens/File/FilePresenter.h": "22402ad125301d46a287bc6129bb1de44e003e443976f5e905722f8a52defa59",
+  "src/UI/Screens/File/FileView.cpp": "52a8dfd6b78ea75a9b8e7a33d2247c0ac683ac31968b6485dcd9507421b2d7cb",
+  "src/UI/Screens/File/FileView.h": "8283e5bc2b9dab051eb363183ffe91b399b941e76be1e6d4c7882b5f244c91b7"
+}

@@ -1,0 +1,53 @@
+		static std::optional<GithubReleaseInfo> getNewestGithubReleaseWithUpgradeAsset()
+		{
+			const auto installed = Indart::parseStableVersion(FIRMWARE_VERSION);
+			if (!installed) return std::nullopt;
+			std::optional<GithubReleaseInfo> best;
+			Indart::Version bestVersion = *installed;
+			// Diez pÃ¡ginas de cien resultados; si se alcanza el lÃ­mite, no se instala nada.
+			for (int page = 1; page <= 10; ++page)
+			{
+				HttpRequest req;
+				req.method = HTTP_GET;
+				req.scheme = "https";
+				req.host = "api.github.com";
+				req.path = std::string(INDART_RELEASES_PATH) + "?per_page=100&page=" + std::to_string(page);
+				req.headers["Accept"] = "application/vnd.github+json";
+				req.headers["User-Agent"] = "DuetScreen-INDART3D";
+				req.timeout = HTTP_TIMEOUT;
+				req.DumpUrl();
+				hv::HttpClient cli;
+				HttpResponse response;
+				cli.send(&req, &response);
+				if (response.status_code != HTTP_STATUS_OK) return std::nullopt;
+				auto payload = nlohmann::json::parse(response.body, nullptr, false);
+				if (payload.is_discarded() || !payload.is_array()) return std::nullopt;
+				for (const auto& release : payload)
+				{
+					if (!release.is_object() ||
+						!release.contains("draft") || !release["draft"].is_boolean() || release["draft"].get<bool>() ||
+						!release.contains("prerelease") || !release["prerelease"].is_boolean() || release["prerelease"].get<bool>() ||
+						!release.contains("tag_name") || !release["tag_name"].is_string() ||
+						!release.contains("assets") || !release["assets"].is_array()) continue;
+					const auto tag = release["tag_name"].get<std::string>();
+					const auto version = Indart::parseStableVersion(tag);
+					if (!version || *version <= bestVersion) continue;
+					for (const auto& asset : release["assets"])
+					{
+						if (!asset.is_object() || !asset.contains("name") || !asset["name"].is_string() ||
+							asset["name"].get<std::string>() != UPGRADE_FILE ||
+							!asset.contains("browser_download_url") || !asset["browser_download_url"].is_string()) continue;
+						const auto url = asset["browser_download_url"].get<std::string>();
+						const auto expected = std::string("https://github.com/") + INDART_UPDATE_REPOSITORY +
+							"/releases/download/" + tag + "/" UPGRADE_FILE;
+						if (url != expected) continue;
+						best = GithubReleaseInfo{tag, url};
+						bestVersion = *version;
+						break;
+					}
+				}
+				if (payload.size() < 100) return best;
+			}
+			LOG_WARN("GitHub release pagination limit reached; refusing partial selection");
+			return std::nullopt;
+		}
